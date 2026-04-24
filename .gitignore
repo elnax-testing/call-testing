@@ -1,0 +1,40 @@
+# Environment variables
+.env
+.env.local
+
+# Local config and generated runtime files
+.DS_Store
+*.log
+config.json
+config.*backup*.json
+config.llm-backup*.json
+config.voice-backup*.json
+configs/*.json
+!configs/*.example.json
+google_creds.json
+data/whatsapp-auth/
+data/kb/
+data/message_assets/
+transcript_*.txt
+*.db
+*.sqlite3
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+.pytest_tmp/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage*
+htmlcov/
+node_modules/
+
+# IDE settings
+.vscode/
+.idea/

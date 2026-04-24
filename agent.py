@@ -1,0 +1,141 @@
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _bootstrap_venv() -> None:
+    project_dir = Path(__file__).resolve().parent
+    venv_python = project_dir / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        return
+    try:
+        current_python = Path(sys.executable).resolve()
+        target_python = venv_python.resolve()
+    except Exception:
+        return
+    if current_python == target_python:
+        return
+    os.execv(str(target_python), [str(target_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+_bootstrap_venv()
+load_dotenv()
+
+from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents.voice import Agent, AgentSession
+from livekit.plugins import silero
+
+try:
+    from livekit.plugins import google as google_plugin
+except ImportError:
+    google_plugin = None
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("voice-agent")
+
+CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+DEFAULT_CONFIG = {
+    "first_line": "Namaste! This is Aryan from SPX AI. We help businesses automate with AI. Hmm, may I ask what kind of business you run?",
+    "agent_instructions": "",
+    "gemini_live_model": "gemini-3.1-flash-native-audio-preview",
+    "gemini_live_voice": "Puck",
+    "gemini_live_language": "",
+    "gemini_tts_model": "gemini-3.1-flash-tts-preview",
+}
+
+
+def read_config() -> dict:
+    if not CONFIG_FILE.exists():
+        return dict(DEFAULT_CONFIG)
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_CONFIG)
+    merged = dict(DEFAULT_CONFIG)
+    merged.update({k: v for k, v in data.items() if v is not None})
+    return merged
+
+
+def get_setting(config: dict, key: str, env_key: str, default: str = "") -> str:
+    value = config.get(key)
+    if value not in (None, ""):
+        return str(value)
+    return os.getenv(env_key, default)
+
+
+class MinimalVoiceAgent(Agent):
+    def __init__(self, config: dict) -> None:
+        prompt = str(config.get("agent_instructions") or "").strip()
+        instructions = prompt or (
+            "You are a concise, polite Indian voice sales assistant. "
+            "Keep replies short, ask one question at a time, and stay helpful."
+        )
+
+        super().__init__(
+            instructions=instructions,
+            stt=self._build_stt(config),
+            llm=self._build_llm(config),
+            tts=self._build_tts(config),
+        )
+        self._first_line = str(config.get("first_line") or DEFAULT_CONFIG["first_line"]).strip()
+
+    def _build_stt(self, config: dict):
+        if google_plugin is None:
+            raise RuntimeError("livekit-plugins-google is required to start the voice agent.")
+        language = str(config.get("gemini_live_language") or "").strip() or None
+        kwargs = {}
+        if language:
+            kwargs["language"] = language
+        return google_plugin.STT(**kwargs)
+
+    def _build_llm(self, config: dict):
+        if google_plugin is None:
+            raise RuntimeError("livekit-plugins-google is required to start the voice agent.")
+        model = str(config.get("gemini_live_model") or DEFAULT_CONFIG["gemini_live_model"]).strip()
+        return google_plugin.LLM(model=model)
+
+    def _build_tts(self, config: dict):
+        if google_plugin is None:
+            raise RuntimeError("livekit-plugins-google is required to start the voice agent.")
+        voice = str(config.get("gemini_live_voice") or DEFAULT_CONFIG["gemini_live_voice"]).strip()
+        language = str(config.get("gemini_live_language") or "").strip() or None
+        kwargs = {"voice_name": voice}
+        if language:
+            kwargs["language"] = language
+        return google_plugin.TTS(**kwargs)
+
+    async def on_enter(self):
+        if self._first_line:
+            await self.session.generate_reply(instructions=f'Say exactly this opening line: "{self._first_line}"')
+
+
+async def entrypoint(ctx: JobContext):
+    config = read_config()
+    logger.info("Worker joined room: %s", ctx.room.name)
+    session = AgentSession(
+        vad=silero.VAD.load(),
+        turn_detection="stt",
+        min_endpointing_delay=0.15,
+    )
+    await session.start(
+        agent=MinimalVoiceAgent(config),
+        room=ctx.room,
+    )
+
+
+if __name__ == "__main__":
+    worker_host = str(os.environ.get("AGENT_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    worker_port = int(str(os.environ.get("AGENT_PORT") or "8081"))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            agent_name="outbound-caller",
+            host=worker_host,
+            port=worker_port,
+        )
+    )
